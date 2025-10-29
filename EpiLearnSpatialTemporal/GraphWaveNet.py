@@ -110,7 +110,7 @@ class GraphWaveNet(BaseModel):
         self.bn = nn.ModuleList()
         self.gconv = nn.ModuleList()
 
-        self.start_conv = nn.Conv2d(in_channels=num_timesteps_input,
+        self.start_conv = nn.Conv2d(in_channels=1,
                                     out_channels=residual_channels,
                                     kernel_size=(1,1))
         if adj_m is not None:
@@ -211,8 +211,7 @@ class GraphWaveNet(BaseModel):
             representing the predicted values for each node over the specified output timesteps.
         """
         #print(input)
-        input = torch.permute(X_batch, (0, 2, 1, 3))
-        input = input.transpose(1, 3)
+        input = X_batch.permute(0, 3, 2, 1).contiguous()
 
         in_len = input.size(3)
         if in_len<self.receptive_field:
@@ -279,7 +278,7 @@ class GraphWaveNet(BaseModel):
         x = F.relu(self.end_conv_1(x))
         x = self.end_conv_2(x)
         
-        x = torch.permute(x, (0, 2, 1, 3)).squeeze()
+        x = x.mean(dim=3)
         return x
 
 

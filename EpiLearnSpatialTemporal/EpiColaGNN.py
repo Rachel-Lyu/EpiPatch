@@ -295,7 +295,7 @@ class EpiColaGNN(BaseModel):
             z = z.view(-1,self.m); #[batch, m]
             out = out * self.ratio + z; #[batch, m]
 
-        return out, y_vector_t #, Beta, Gamma, outputNGMT
+        return out #, y_vector_t, Beta, Gamma, outputNGMT
     
 
     def initialize(self):

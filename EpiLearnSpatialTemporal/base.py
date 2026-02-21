@@ -1441,7 +1441,9 @@ class BaseModel(nn.Module):
 
             X_batch = X_batch.to(device)
             y_batch = y_batch.to(device)
-
+            X_batch = torch.nan_to_num(X_batch, nan=0.0, posinf=1e4, neginf=-1e4)
+            y_batch = torch.nan_to_num(y_batch, nan=0.0, posinf=1e4, neginf=-1e4)
+            
             if states is not None:
                 X_states = states[indices]
                 X_states = X_states.to(device)
@@ -1458,12 +1460,19 @@ class BaseModel(nn.Module):
                 graph = graph.to(device)
             out = self.forward(X_batch, graph, X_states, batch_graph)
             out = self._apply_future_ti(out, X_states)
+            out = torch.nan_to_num(out, nan=0.0, posinf=1e4, neginf=-1e4)
             loss = loss_fn(out, y_batch)
             # import ipdb; ipdb.set_trace()
             loss = self._apply_epi_reg_loss(loss, X_batch, graph, batch_graph, y_batch)
+            if not torch.isfinite(loss):
+                optimizer.zero_grad(set_to_none=True)
+                continue
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
             optimizer.step()
             epoch_training_losses.append(loss.detach().cpu().numpy())
+            if len(epoch_training_losses) == 0:
+                return float('nan')
         return sum(epoch_training_losses)/len(epoch_training_losses)
     
     def evaluate(self, loss_fn, feature, graph = None, dynamic_graph=None, target = None, states = None, device = 'cpu'):
@@ -1477,12 +1486,15 @@ class BaseModel(nn.Module):
 
             if dynamic_graph is not None:
                 dynamic_graph = dynamic_graph.to(device)
-            
+
             if states is not None:
                 states = states.to(device)
 
+            feature = torch.nan_to_num(feature, nan=0.0, posinf=1e4, neginf=-1e4)
+            target = torch.nan_to_num(target, nan=0.0, posinf=1e4, neginf=-1e4)
             out = self.forward(feature, graph, states, dynamic_graph)
             out = self._apply_future_ti(out, states)
+            out = torch.nan_to_num(out, nan=0.0, posinf=1e4, neginf=-1e4)
             val_loss = loss_fn(out, target)
             val_loss = self._apply_epi_reg_loss(val_loss, feature, graph, dynamic_graph, target)
             val_loss = val_loss.detach().cpu().item()
@@ -1606,12 +1618,20 @@ class BaseTemporalModel(nn.Module):
             X_batch, y_batch = feature[indices], target[indices]
             X_batch = X_batch.to(device=device)
             y_batch = y_batch.to(device=device)
-            
+            X_batch = torch.nan_to_num(X_batch, nan=0.0, posinf=1e4, neginf=-1e4)
+            y_batch = torch.nan_to_num(y_batch, nan=0.0, posinf=1e4, neginf=-1e4)
             out = self.forward(X_batch)
+            out = torch.nan_to_num(out, nan=0.0, posinf=1e4, neginf=-1e4)
             loss = loss_fn(out.reshape(y_batch.shape), y_batch)
+            if not torch.isfinite(loss):
+                optimizer.zero_grad(set_to_none=True)
+                continue
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
             optimizer.step()
             epoch_training_losses.append(loss.detach().cpu().numpy())
+            if len(epoch_training_losses) == 0:
+                return float('nan')
         return sum(epoch_training_losses)/len(epoch_training_losses)
     
     def evaluate(self, loss_fn, feature, target = None, device = 'cpu'):
@@ -1620,7 +1640,10 @@ class BaseTemporalModel(nn.Module):
             feature = feature.to(device=device)
             target = target.to(device=device)
 
+            feature = torch.nan_to_num(feature, nan=0.0, posinf=1e4, neginf=-1e4)
+            target = torch.nan_to_num(target, nan=0.0, posinf=1e4, neginf=-1e4)
             out = self.forward(feature)
+            out = torch.nan_to_num(out, nan=0.0, posinf=1e4, neginf=-1e4)
             val_loss = loss_fn(out.reshape(target.shape), target)
             val_loss = val_loss.detach().cpu().numpy().item()
             

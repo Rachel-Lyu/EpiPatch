@@ -62,8 +62,7 @@ def build_splits(lookback=28, horizon=7, train_rate=0.6, val_rate=0.2, permute=F
         states=train_dataset["states"],
         dynamic_adj=train_dataset["dynamic_graph"],
         lookback_window_size=lookback,
-        horizon_size=horizon,
-        ahead=0,
+        horizon=horizon,
         permute=permute,
     )
     val_input, val_target, _, val_states_future, val_adj = generate_dataset(
@@ -72,8 +71,7 @@ def build_splits(lookback=28, horizon=7, train_rate=0.6, val_rate=0.2, permute=F
         states=val_dataset["states"],
         dynamic_adj=val_dataset["dynamic_graph"],
         lookback_window_size=lookback,
-        horizon_size=horizon,
-        ahead=0,
+        horizon=horizon,
         permute=permute,
     )
     test_input, test_target, _, test_states_future, test_adj = generate_dataset(
@@ -82,8 +80,7 @@ def build_splits(lookback=28, horizon=7, train_rate=0.6, val_rate=0.2, permute=F
         states=test_dataset["states"],
         dynamic_adj=test_dataset["dynamic_graph"],
         lookback_window_size=lookback,
-        horizon_size=horizon,
-        ahead=0,
+        horizon=horizon,
         permute=permute,
     )
 
@@ -362,7 +359,7 @@ def main():
     data_df, adj, splits, tid_s, train_dataset = build_splits()
     adj = adj.type(torch.float)
     dtw_matrix = compute_dtw_matrix(train_dataset, dataset_name=dataset_name)
-    out_dir = f"outputs_{dataset_name}"
+    out_dir = f"outputs0217_{dataset_name}"
     results = []
 
     model_names = [
@@ -371,45 +368,47 @@ def main():
         "ColaGNN",
         "DCRNN",
         "EpiGNN",
-        "GraphWaveNet",
         "MTGNN",
         "STGCN",
         "GTS",
         "StemGNN",
         "STNorm",
         "EARTH",
+        "GraphWaveNet",
     ]
     epi_modes = [False, "sir_incidence", "ngm"]
     loss_names = ["mse", "mse_filtered"]
 
-    for model_name in model_names:
-        for epi_mode in epi_modes:
-            for loss_name in loss_names:
-                use_filtering = loss_name == "mse_filtered"
-                for use_einn in (False, True):
-                    if use_einn and not epi_mode:
-                        continue
-                    for use_future_ti in (True, False):
-                        tag = (
-                            f"{model_name}|epi={epi_mode}|einn={use_einn}|filter={use_filtering}|ti={use_future_ti}"
-                        )
-                        metrics_out = run_experiment(
-                            model_name=model_name,
-                            splits=splits,
-                            adj=adj,
-                            tid_s=tid_s,
-                            use_future_ti=use_future_ti,
-                            epi_mode=epi_mode,
-                            use_einn=use_einn,
-                            loss_name=loss_name,
-                            horizon=splits["train"]["targets"].shape[1],
-                            device=device,
-                            dtw_matrix=dtw_matrix if model_name == "EARTH" else None,
-                        )
-                        results.append(save_metrics(metrics_out, out_dir, tag))
-
-    df = pd.DataFrame(results)
-    df.to_csv(os.path.join(out_dir, f"metrics_{dataset_name}.csv"), index=False)
+    for horizon in [1, 7]: 
+        data_df, adj, splits, tid_s, train_dataset = build_splits(lookback=28, horizon=horizon, train_rate=0.6, val_rate=0.2)
+        dtw_matrix = compute_dtw_matrix(train_dataset, dataset_name=dataset_name)
+        for model_name in model_names:
+            for epi_mode in epi_modes:
+                for loss_name in loss_names:
+                    use_filtering = loss_name == "mse_filtered"
+                    for use_einn in (False, True):
+                        if use_einn and not epi_mode:
+                            continue
+                        for use_future_ti in (True, False):
+                            tag = (
+                                f"{model_name}|horizon={horizon}|epi={epi_mode}|einn={use_einn}|filter={use_filtering}|ti={use_future_ti}"
+                            )
+                            metrics_out = run_experiment(
+                                model_name=model_name,
+                                splits=splits,
+                                adj=adj,
+                                tid_s=tid_s,
+                                use_future_ti=use_future_ti,
+                                epi_mode=epi_mode,
+                                use_einn=use_einn,
+                                loss_name=loss_name,
+                                horizon=splits["train"]["targets"].shape[1],
+                                device=device,
+                                dtw_matrix=dtw_matrix if model_name == "EARTH" else None,
+                            )
+                            results.append(save_metrics(metrics_out, out_dir, tag))
+                            df = pd.DataFrame(results)
+                            df.to_csv(os.path.join(out_dir, f"metrics_{dataset_name}.csv"), index=False)
 
 if __name__ == "__main__":
     main()

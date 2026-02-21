@@ -3,7 +3,7 @@ import torch
 from . import metrics
 
 class BaseTask:
-    def __init__(self, prototype, model, dataset, lookback, horizon, ahead, device='cpu'):
+    def __init__(self, prototype, model, dataset, lookback, horizon, device='cpu'):
         self.model = model
         self.prototype = prototype
         self.dataset = dataset
@@ -28,8 +28,8 @@ class Forecast(BaseTask):
     in settings that involve spatial-temporal dynamics. The class supports model initialization, training, evaluation, 
     and preprocessing, facilitating the application of various neural network architectures and configurations.
     """
-    def __init__(self, prototype = None, model = None, dataset = None, lookback = None, horizon = None, ahead=0, device = 'cpu'):
-        super().__init__(prototype, model, dataset, lookback, horizon, ahead, device)
+    def __init__(self, prototype = None, model = None, dataset = None, lookback = None, horizon = None, device = 'cpu'):
+        super().__init__(prototype, model, dataset, lookback, horizon, device)
         self.feat_mean = 0
         self.feat_std = 1
         self.device = device
@@ -304,3 +304,139 @@ class Forecast(BaseTask):
                 {'features': val_input, 'targets': val_target, 'states': val_states, 'dynamic_graph': val_adj}, \
                 {'features': test_input, 'targets': test_target, 'states': test_states, 'dynamic_graph': test_adj}, \
                 adj
+
+    def _slice_dataset_time(self, dataset, start_idx, end_idx):
+        """Create a shallow time-sliced dataset for rolling retraining."""
+        sliced = type(dataset)()
+        sliced.x = dataset.x[start_idx:end_idx]
+        sliced.y = None if getattr(dataset, "y", None) is None else dataset.y[start_idx:end_idx]
+        sliced.states = None if getattr(dataset, "states", None) is None else dataset.states[start_idx:end_idx]
+        sliced.dynamic_graph = (
+            None
+            if getattr(dataset, "dynamic_graph", None) is None
+            else dataset.dynamic_graph[start_idx:end_idx]
+        )
+        sliced.graph = dataset.graph
+        return sliced
+
+    def run_rolling_retrain(
+        self,
+        dataset=None,
+        horizons=(1,),
+        retrain_every=7,
+        retrain_train_length=None,
+        first_target=None,
+        permute_dataset=False,
+        train_rate=0.6,
+        val_rate=0.2,
+        loss='mse',
+        epochs=100,
+        batch_size=10,
+        lr=1e-3,
+        weight_decay=0,
+        region_idx=None,
+        initialize=True,
+        verbose=False,
+        patience=100,
+        device=None,
+        model_args={},
+    ):
+        """
+        Walk-forward retraining.
+        For each retraining anchor and each horizon, retrain on a recent history slice
+        and predict the next `retrain_every` target times when available.
+        """
+        if dataset is None:
+            dataset = self.dataset
+
+        if retrain_every < 1:
+            raise ValueError(f"retrain_every must be >= 1, got {retrain_every}")
+        if len(horizons) == 0:
+            raise ValueError("horizons must be non-empty")
+
+        n_total = dataset.x.shape[0]
+        max_h = max(horizons)
+        first_target = (self.lookback + max_h - 1) if first_target is None else first_target
+        retrain_train_length = first_target if retrain_train_length is None else retrain_train_length
+
+        if retrain_train_length < 1:
+            raise ValueError(f"retrain_train_length must be >= 1, got {retrain_train_length}")
+
+        # cache full windows per horizon for efficient target-index selection
+        full_windows = {}
+        for h in horizons:
+            full_windows[h] = dataset.generate_dataset(
+                X=dataset.x,
+                Y=dataset.y,
+                states=dataset.states,
+                dynamic_adj=dataset.dynamic_graph,
+                lookback_window_size=self.lookback,
+                horizon=h,
+                permute=permute_dataset,
+            )
+
+        out = {int(h): [] for h in horizons}
+        original_horizon = self.horizon
+
+        for start_idx in range(first_target, n_total, retrain_every):
+            train_end = start_idx
+            train_start = max(0, train_end - retrain_train_length)
+            target_indices = list(range(start_idx, min(start_idx + retrain_every, n_total)))
+
+            sliced_dataset = self._slice_dataset_time(dataset, train_start, train_end)
+
+            for h in horizons:
+                self.horizon = int(h)
+                self.train_model(
+                    dataset=sliced_dataset,
+                    permute_dataset=permute_dataset,
+                    train_rate=train_rate,
+                    val_rate=val_rate,
+                    loss=loss,
+                    epochs=epochs,
+                    batch_size=batch_size,
+                    lr=lr,
+                    weight_decay=weight_decay,
+                    region_idx=region_idx,
+                    initialize=initialize,
+                    verbose=verbose,
+                    patience=patience,
+                    device=device,
+                    model_args=model_args,
+                )
+
+                X_all, y_all, s_all, a_all = full_windows[h]
+                offset = self.lookback + h - 1
+                sample_ids = [t - offset for t in target_indices if 0 <= (t - offset) < X_all.shape[0]]
+                valid_targets = [t for t in target_indices if 0 <= (t - offset) < X_all.shape[0]]
+                if len(sample_ids) == 0:
+                    continue
+
+                x_eval = X_all[sample_ids]
+                y_true = y_all[sample_ids]
+                s_eval = None if s_all is None else s_all[sample_ids]
+                a_eval = None if a_all is None else a_all[sample_ids]
+
+                with torch.no_grad():
+                    y_pred = self.model.predict(
+                        feature=x_eval,
+                        graph=dataset.graph,
+                        states=s_eval,
+                        dynamic_graph=a_eval,
+                    )
+                if isinstance(y_pred, tuple):
+                    y_pred = y_pred[0]
+                y_pred = y_pred.reshape(y_true.shape)
+
+                out[int(h)].append(
+                    {
+                        "train_start": train_start,
+                        "train_end": train_end,
+                        "target_indices": valid_targets,
+                        "y_true": y_true.detach().cpu(),
+                        "y_pred": y_pred.detach().cpu(),
+                    }
+                )
+
+        self.horizon = original_horizon
+        return out

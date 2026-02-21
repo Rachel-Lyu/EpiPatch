@@ -226,7 +226,7 @@ class UniversalDataset():
     def save(self):
         pass
 
-    def generate_dataset(self, X = None, Y = None, states = None, dynamic_adj = None, lookback_window_size = 1, horizon_size = 1, ahead=0, permute = False):
+    def generate_dataset(self, X = None, Y = None, states = None, dynamic_adj = None, lookback_window_size = 1, horizon = 1, permute = False):
         """
         Takes node features for the graph and divides them into multiple samples
         along the time-axis by sliding a window of size (num_timesteps_input+
@@ -244,10 +244,12 @@ class UniversalDataset():
         if Y is None:
             Y = self.y
         # import ipdb; ipdb.set_trace()
-        indices = [(i, i + (lookback_window_size + ahead +horizon_size)) for i in range(X.shape[0] - (lookback_window_size + ahead + horizon_size) + 1)]
+        if horizon < 1:
+            raise ValueError(f"horizon must be >= 1, got {horizon}")
+        indices = [(i, i + (lookback_window_size + horizon)) for i in range(X.shape[0] - (lookback_window_size + horizon) + 1)]
         target = []
         for i, j in indices:
-            target.append(Y[i + lookback_window_size+ahead: j])
+            target.append(Y[i + lookback_window_size + horizon - 1: j])
         
         targets = torch.stack(target) if len(target) > 0 else torch.Tensor([[[]]])
         if permute:

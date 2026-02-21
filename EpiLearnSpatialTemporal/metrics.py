@@ -24,6 +24,10 @@ def get_loss(loss_name = 'mse'):
         return nn.MSELoss()
     elif loss_name == 'mae':
         return nn.L1Loss()
+    elif loss_name == 'mse_weighted_nonzero':
+        return mse_weighted_nonzero_loss
+    elif loss_name == 'mae_weighted_nonzero':
+        return mae_weighted_nonzero_loss
     elif loss_name == 'mse_filtered':
         return mse_filtered_loss
     elif loss_name == 'mae_filtered':
@@ -53,7 +57,7 @@ def crps_ensemble(samples, target):
 def wis_from_quantiles(q, target, alphas):
     """
     q: (1 + 2K, ...) quantiles in order:
-       [0.5, 0.5-0.5*alpha1, 0.5+0.5*alpha1, 0.5-0.5*alpha2, 0.5+0.5*alpha2, ...]
+       [0.5, alpha1/2, 1-alpha1/2, alpha2/2, 1-alpha2/2, ...]
     target: (...) observations
     alphas: (alpha1, alpha2, ..., alphaK)
     returns scalar WIS
@@ -70,7 +74,7 @@ def wis_from_quantiles(q, target, alphas):
         above = (y > u).float()
         iscore = width + (2.0/alpha) * (l - y) * below + (2.0/alpha) * (y - u) * above
         wis_num = wis_num + 0.5 * alpha * iscore
-    denom = 0.5 + 0.5 * sum(alphas)
+    denom = 0.5 + len(alphas)
     wis = wis_num / denom
     return wis.mean()
 
@@ -103,6 +107,49 @@ def mae_filtered_loss(pred, target, iqr_mult=1.5):
     upper = q3 + iqr_mult * iqr if iqr != 0 else q3
     mask &= (target >= lower) & (target <= upper)
     return torch.mean(torch.abs(pred[mask] - target[mask])) if mask.any() else torch.tensor(0., device=target.device)
+
+def _safe_log1p(x):
+    return torch.log1p(torch.clamp(x, min=0.0))
+
+
+def mse_weighted_nonzero_loss(pred, target, nonzero_weight=5.0, use_log1p=True):
+    pred = pred.reshape_as(target).float()
+    target = target.float()
+
+    pred = torch.nan_to_num(pred, nan=0.0, posinf=1e6, neginf=-1e6)
+    target = torch.nan_to_num(target, nan=0.0, posinf=1e6, neginf=-1e6)
+
+    if use_log1p:
+        pred_cmp = _safe_log1p(pred)
+        target_cmp = _safe_log1p(target)
+    else:
+        pred_cmp = pred
+        target_cmp = target
+
+    weights = torch.ones_like(target_cmp)
+    weights = torch.where(target > 0, weights * nonzero_weight, weights)
+    sq = (pred_cmp - target_cmp) ** 2
+    return (weights * sq).sum() / torch.clamp(weights.sum(), min=1.0)
+
+
+def mae_weighted_nonzero_loss(pred, target, nonzero_weight=5.0, use_log1p=True):
+    pred = pred.reshape_as(target).float()
+    target = target.float()
+
+    pred = torch.nan_to_num(pred, nan=0.0, posinf=1e6, neginf=-1e6)
+    target = torch.nan_to_num(target, nan=0.0, posinf=1e6, neginf=-1e6)
+
+    if use_log1p:
+        pred_cmp = _safe_log1p(pred)
+        target_cmp = _safe_log1p(target)
+    else:
+        pred_cmp = pred
+        target_cmp = target
+
+    weights = torch.ones_like(target_cmp)
+    weights = torch.where(target > 0, weights * nonzero_weight, weights)
+    ae = torch.abs(pred_cmp - target_cmp)
+    return (weights * ae).sum() / torch.clamp(weights.sum(), min=1.0)
 
 def stan_loss(output, label, scale=0.5):
     """

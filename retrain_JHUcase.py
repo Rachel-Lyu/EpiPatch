@@ -36,10 +36,10 @@ def fix_seed(seed=42):
     os.environ["PYTHONHASHSEED"] = str(seed)
 
 
-def build_splits(lookback=12, horizon=4, train_rate=0.6, val_rate=0.2, permute=False):
-    data_df = pd.read_csv("rawData/processed/ILI2019.csv", index_col=0)
+def build_splits(lookback=28, horizon=7, train_rate=0.6, val_rate=0.2, permute=False):
+    data_df = pd.read_csv("rawData/processed/JHUcase.csv", index_col = 0)
     data_df.index = pd.to_datetime(data_df.index)
-    adj_df = pd.read_csv("rawData/processed/ILI2019_adj.csv", index_col=0)
+    adj_df = pd.read_csv("rawData/processed/JHUcase_adj.csv", index_col = 0)
 
     dataset = UniversalDataset()
     data = np.expand_dims(data_df.values, axis=-1)
@@ -48,9 +48,9 @@ def build_splits(lookback=12, horizon=4, train_rate=0.6, val_rate=0.2, permute=F
     dataset.graph = torch.FloatTensor(adj_df.to_numpy())
 
     dow = torch.as_tensor(data_df.index.dayofweek.values, dtype=torch.long)
-    woy = torch.as_tensor(data_df.index.isocalendar().week.values - 1, dtype=torch.long)
-    dataset.states = torch.stack([woy], dim=-1)
-    tid_s = {"woy": 53}
+    # woy = torch.as_tensor(data_df.index.isocalendar().week.values - 1, dtype=torch.long)
+    dataset.states = torch.stack([dow], dim=-1)
+    tid_s = {'dow': 7}
 
     train_dataset, val_dataset, test_dataset = dataset.ganerate_splits(
         train_rate=train_rate, val_rate=val_rate
@@ -151,13 +151,13 @@ def build_model(name, lookback, horizon, num_nodes, adj, tid_s, use_future_ti, d
         ti_hidden=(8,),
     )
     if name == "AGCRN":
-        return AGCRN(rnn_units=8, nlayers=2, embed_dim=8, cheb_k=2, **common)
+        return AGCRN(rnn_units=16, nlayers=2, embed_dim=8, cheb_k=2, **common)
     if name == "ColaGNN":
-        return ColaGNN(nhid=16, n_layer=1, **common)
+        return ColaGNN(nhid=16, n_layer=2, **common)
     if name == "DCRNN":
         return DCRNN(max_diffusion_step=3, **common)
     if name == "EpiGNN":
-        return EpiGNN(k=5, hidA=16, hidR=4, hidP=1, n_layer=2, dropout=0.2, **common)
+        return EpiGNN(k=5, hidA=32, hidR=4, hidP=1, n_layer=2, dropout=0.2, **common)
     if name == "EARTH":
         if dtw_matrix is None:
             raise ValueError("EARTH requires dtw_matrix.")
@@ -174,15 +174,15 @@ def build_model(name, lookback, horizon, num_nodes, adj, tid_s, use_future_ti, d
             skip_channels=32,
             end_channels=64,
             kernel_size=2,
-            blocks=2,
-            nlayers=2,
+            blocks=4,
+            nlayers=8,
             **common,
         )
     if name == "MTGNN":
         return MTGNN(
             gcn_depth=2,
             dropout=0.2,
-            subgraph_size=5,
+            subgraph_size=3,
             node_dim=8,
             dilation_exponential=1,
             conv_channels=8,
@@ -195,13 +195,13 @@ def build_model(name, lookback, horizon, num_nodes, adj, tid_s, use_future_ti, d
             **common,
         )
     if name == "STGCN":
-        return STGCN(nhids=32, **common)
+        return STGCN(nhids=16, **common)
     if name == "GTS":
         return GTS(rnn_units=32, max_diffusion_step=2, **common)
     if name == "StemGNN":
         return StemGNN(stack_cnt=2, multi_layer=4, dropout_rate=0.2, leaky_rate=0.2, **common)
     if name == "STNorm":
-        return STNorm(channels=8, kernel_size=2, blocks=4, layers=2, **common)
+        return STNorm(channels=8, kernel_size=2, blocks=8, layers=2, **common)
     if name == "Dlinear":
         return DlinearModel(
             num_timesteps_input=lookback,
@@ -352,35 +352,259 @@ def save_metrics(metrics_out, out_dir, tag):
         f.write(pd.Series(data).to_json())
     return data
 
+def run_retraining(
+    dataset_name,
+    data_df,
+    adj,
+    tid_s,
+    model_name="Dlinear",
+    horizon=7,
+    lookback=28,
+    retrain_every=90,
+    retrain_train_length=180,
+    first_target=None,
+    out_dir="outputs_retrain",
+    device="cpu",
+    dtw_matrix=None,
+    epochs=50,
+    use_future_ti=True,
+    epi_mode=False,
+    use_einn=False,
+    loss_name="mse",
+    tag_prefix="",
+):
+    """Walk-forward retraining demo with per-retrain plotting."""
+    n_total = len(data_df)
+    if first_target is None:
+        first_target = lookback + horizon - 1
+
+    values = torch.FloatTensor(np.expand_dims(data_df.values, axis=-1))
+    targets_full = values[:, :, 0]
+    dow = torch.as_tensor(data_df.index.dayofweek.values, dtype=torch.long)
+    if "woy" in tid_s:
+        woy = torch.as_tensor(data_df.index.isocalendar().week.values - 1, dtype=torch.long)
+        states = torch.stack([woy], dim=-1)
+    else:
+        states = torch.stack([dow], dim=-1)
+
+    full_X, full_y, _, full_states, full_adj = generate_dataset(
+        X=values,
+        Y=targets_full,
+        states=states,
+        dynamic_adj=None,
+        lookback_window_size=lookback,
+        horizon=horizon,
+        permute=False,
+    )
+
+    rows = []
+    retrain_id = 0
+    for start_idx in range(first_target, n_total, retrain_every):
+        train_end = start_idx
+        train_start = max(0, train_end - retrain_train_length)
+        target_indices = list(range(start_idx, min(start_idx + retrain_every, n_total)))
+
+        subset_values = values[train_start:train_end]
+        subset_targets = targets_full[train_start:train_end]
+        subset_states = states[train_start:train_end]
+
+        subset_ds = UniversalDataset()
+        subset_ds.x = subset_values
+        subset_ds.y = subset_targets
+        subset_ds.graph = adj
+        subset_ds.states = subset_states
+        train_ds, val_ds, _ = subset_ds.ganerate_splits(train_rate=0.8, val_rate=0.2)
+
+        train_input, train_target, _, train_states_future, train_adj = generate_dataset(
+            X=train_ds["features"],
+            Y=train_ds["target"],
+            states=train_ds["states"],
+            dynamic_adj=train_ds["dynamic_graph"],
+            lookback_window_size=lookback,
+            horizon=horizon,
+            permute=False,
+        )
+        val_input, val_target, _, val_states_future, val_adj = generate_dataset(
+            X=val_ds["features"],
+            Y=val_ds["target"],
+            states=val_ds["states"],
+            dynamic_adj=val_ds["dynamic_graph"],
+            lookback_window_size=lookback,
+            horizon=horizon,
+            permute=False,
+        )
+
+        if train_input.numel() == 0 or val_input.numel() == 0:
+            continue
+
+        model = build_model(
+            model_name,
+            lookback=lookback,
+            horizon=train_target.shape[1],
+            num_nodes=adj.shape[0],
+            adj=adj,
+            tid_s=tid_s,
+            use_future_ti=use_future_ti,
+            device=device,
+            dtw_matrix=dtw_matrix,
+        )
+
+        model.fit(
+            train_input=train_input,
+            train_target=train_target,
+            train_states=train_states_future,
+            train_graph=adj,
+            train_dynamic_graph=train_adj,
+            val_input=val_input,
+            val_target=val_target,
+            val_states=val_states_future,
+            val_graph=adj,
+            val_dynamic_graph=val_adj,
+            loss=loss_name,
+            epochs=epochs,
+            use_epi_reg=False if not epi_mode else 0.1,
+            epi_mode=epi_mode,
+        )
+
+        if use_einn and epi_mode:
+            einn = EinnModule(
+                num_nodes=adj.shape[0],
+                horizon=horizon,
+                in_features=train_input.shape[-1],
+                epi_mode=epi_mode,
+            ).to(device)
+            optimizer = torch.optim.Adam(list(model.parameters()) + list(einn.parameters()), lr=1e-3)
+            model.train()
+            einn.train()
+            y_hat = model(train_input, adj, train_states_future, train_adj)
+            L_base = F.mse_loss(y_hat, train_target)
+            L_ode, L_data, y_einn = einn.losses(
+                train_input,
+                train_target,
+                graph=adj,
+                dynamic_graph=train_adj,
+            )
+            L_align = F.mse_loss(y_hat, y_einn)
+            total_loss = L_base + 0.1 * L_ode + 0.1 * L_data + 0.1 * L_align
+            total_loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+
+        offset = lookback + horizon - 1
+        sample_ids = [t - offset for t in target_indices if 0 <= (t - offset) < full_X.shape[0]]
+        valid_targets = [t for t in target_indices if 0 <= (t - offset) < full_X.shape[0]]
+        if len(sample_ids) == 0:
+            continue
+
+        x_eval = full_X[sample_ids]
+        y_true = full_y[sample_ids]
+        states_eval = None if full_states is None else full_states[sample_ids]
+        adj_eval = None if full_adj is None else full_adj[sample_ids]
+
+        with torch.no_grad():
+            y_pred = model.predict(
+                x_eval,
+                graph=adj,
+                states=states_eval,
+                dynamic_graph=adj_eval,
+            )
+        y_pred = y_pred.reshape(y_true.shape)
+
+        for local_i, t_idx in enumerate(valid_targets):
+            for state_idx, state_name in enumerate(data_df.columns):
+                rows.append(
+                    {
+                        "retrain_id": retrain_id,
+                        "timestamp": data_df.index[t_idx],
+                        "state_idx": state_idx,
+                        "state": str(state_name),
+                        "y_true": y_true[local_i, 0, state_idx].item(),
+                        "y_pred": y_pred[local_i, 0, state_idx].item(),
+                    }
+                )
+        retrain_id += 1
+
+    retrain_df = pd.DataFrame(rows)
+    if retrain_df.empty:
+        return retrain_df
+
+    os.makedirs(out_dir, exist_ok=True)
+    csv_path = os.path.join(out_dir, f"retrain_{dataset_name}_{tag_prefix}.csv")
+    retrain_df.to_csv(csv_path, index=False)
+    return retrain_df
+
+
+def plot_retraining_state_from_csv(csv_path, state=None, state_idx=None, out_path=None):
+    """Read retraining CSV and plot one specific state across retrain windows."""
+    df = pd.read_csv(csv_path)
+    if df.empty:
+        raise ValueError(f"No rows in {csv_path}")
+
+    if state is None and state_idx is None:
+        state = str(df["state"].iloc[0])
+
+    if state is not None:
+        sub_df = df[df["state"].astype(str) == str(state)].copy()
+        label = f"state={state}"
+    else:
+        sub_df = df[df["state_idx"] == int(state_idx)].copy()
+        label = f"state_idx={state_idx}"
+
+    if sub_df.empty:
+        raise ValueError(f"No rows found for {label} in {csv_path}")
+
+    sub_df["timestamp"] = pd.to_datetime(sub_df["timestamp"])
+    sub_df = sub_df.sort_values(["retrain_id", "timestamp"])
+
+    plt.figure(figsize=(11, 4))
+    for rid, grp in sub_df.groupby("retrain_id"):
+        grp = grp.sort_values("timestamp")
+        plt.plot(grp["timestamp"], grp["y_pred"], alpha=0.5, label=f"pred_r{rid}")
+
+    truth = sub_df.sort_values("timestamp").drop_duplicates(subset=["timestamp"], keep="last")
+    plt.plot(truth["timestamp"], truth["y_true"], color="black", linewidth=1.5, label="y_true")
+    plt.title(f"Rolling retraining predictions ({label})")
+    plt.xlabel("timestamp")
+    plt.ylabel("target")
+    plt.legend(ncol=4, fontsize=7)
+    plt.tight_layout()
+
+    if out_path is None:
+        suffix = str(state) if state is not None else f"idx_{state_idx}"
+        out_path = csv_path.replace(".csv", f"_plot_{suffix}.png")
+    plt.savefig(out_path)
+    plt.close()
+    return out_path
+
 def main():
-    dataset_name="ILI2019"
+    dataset_name="JHUcase"
     fix_seed(42)
     device = "cpu"
     data_df, adj, splits, tid_s, train_dataset = build_splits()
     adj = adj.type(torch.float)
     dtw_matrix = compute_dtw_matrix(train_dataset, dataset_name=dataset_name)
-    out_dir = f"outputs0217_{dataset_name}"
-    results = []
+    out_dir = f"retrain0218_{dataset_name}"
+    # results = []
 
     model_names = [
-        "Dlinear",
         "AGCRN",
-        "ColaGNN",
         "DCRNN",
+        "GTS",
+        "Dlinear",
+        "ColaGNN",
         "EpiGNN",
         "MTGNN",
         "STGCN",
-        "GTS",
         "StemGNN",
         "STNorm",
         "EARTH",
         "GraphWaveNet",
     ]
-    epi_modes = [False, "sir_percent", "ngm"]
-    loss_names = ["mse", "mse_filtered"]
+    epi_modes = [False, "sir_incidence", "ngm"]
+    loss_names = ["mse_weighted_nonzero", "mse_filtered"]
 
-    for horizon in [1, 4]: 
-        data_df, adj, splits, tid_s, train_dataset = build_splits(lookback=12, horizon=4, train_rate=0.6, val_rate=0.2)
+    for horizon in [1, 7]: 
+        data_df, adj, splits, tid_s, train_dataset = build_splits(lookback=28, horizon=horizon, train_rate=0.6, val_rate=0.2)
         dtw_matrix = compute_dtw_matrix(train_dataset, dataset_name=dataset_name)
         for model_name in model_names:
             for epi_mode in epi_modes:
@@ -393,22 +617,51 @@ def main():
                             tag = (
                                 f"{model_name}|horizon={horizon}|epi={epi_mode}|einn={use_einn}|filter={use_filtering}|ti={use_future_ti}"
                             )
-                            metrics_out = run_experiment(
-                                model_name=model_name,
-                                splits=splits,
+                            retrain_tag = tag.replace("|", "__")
+                            run_retraining(
+                                dataset_name=dataset_name,
+                                data_df=data_df,
                                 adj=adj,
                                 tid_s=tid_s,
+                                model_name=model_name,
+                                horizon=horizon,
+                                lookback=28,
+                                retrain_every=90,
+                                retrain_train_length=180,
+                                out_dir=out_dir,
+                                device=device,
+                                dtw_matrix=dtw_matrix if model_name == "EARTH" else None,
+                                epochs=50,
                                 use_future_ti=use_future_ti,
                                 epi_mode=epi_mode,
                                 use_einn=use_einn,
                                 loss_name=loss_name,
-                                horizon=splits["train"]["targets"].shape[1],
-                                device=device,
-                                dtw_matrix=dtw_matrix if model_name == "EARTH" else None,
+                                tag_prefix=retrain_tag,
                             )
-                            results.append(save_metrics(metrics_out, out_dir, tag))
-                            df = pd.DataFrame(results)
-                            df.to_csv(os.path.join(out_dir, f"metrics_{dataset_name}.csv"), index=False)
+                            csv_path = os.path.join(
+                                out_dir,
+                                f"retrain_{dataset_name}_{retrain_tag}.csv",
+                            )
+                            plot_retraining_state_from_csv(
+                                csv_path,
+                                state='PA',
+                            )
+                            # metrics_out = run_experiment(
+                            #     model_name=model_name,
+                            #     splits=splits,
+                            #     adj=adj,
+                            #     tid_s=tid_s,
+                            #     use_future_ti=use_future_ti,
+                            #     epi_mode=epi_mode,
+                            #     use_einn=use_einn,
+                            #     loss_name=loss_name,
+                            #     horizon=splits["train"]["targets"].shape[1],
+                            #     device=device,
+                            #     dtw_matrix=dtw_matrix if model_name == "EARTH" else None,
+                            # )
+                            # results.append(save_metrics(metrics_out, out_dir, tag))
+                            # df = pd.DataFrame(results)
+                            # df.to_csv(os.path.join(out_dir, f"metrics_{dataset_name}.csv"), index=False)
 
 if __name__ == "__main__":
     main()

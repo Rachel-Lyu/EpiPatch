@@ -65,8 +65,7 @@ train_input, train_target, train_states_past, train_states_future, train_adj = g
     states=train_dataset["states"],
     dynamic_adj=train_dataset["dynamic_graph"],
     lookback_window_size=lookback,
-    horizon_size=horizon,
-    ahead=0,
+    horizon=horizon,
     permute=permute,
 )
 
@@ -76,8 +75,7 @@ val_input, val_target, val_states_past, val_states_future, val_adj = generate_da
     states=val_dataset["states"],
     dynamic_adj=val_dataset["dynamic_graph"],
     lookback_window_size=lookback,
-    horizon_size=horizon,
-    ahead=0,
+    horizon=horizon,
     permute=permute,
 )
 
@@ -87,8 +85,7 @@ test_input, test_target, test_states_past, test_states_future, test_adj = genera
     states=test_dataset["states"],
     dynamic_adj=test_dataset["dynamic_graph"],
     lookback_window_size=lookback,
-    horizon_size=horizon,
-    ahead=0,
+    horizon=horizon,
     permute=permute,
 )
 
@@ -113,7 +110,7 @@ test_split = {
 ```
 
 - `lookback`: how many past time points are fed into the model per sample (e.g., 28).
-- `horizon`: how many future time points to predict per sample (e.g., 7).
+- `horizon`: fixed lead time to predict per sample (e.g., 7 means predict only t+7).
 - `train_rate`, `val_rate`: temporal split ratios (test is the remainder).
 - `tid_s` stores the categorical vocabulary sizes (e.g., `dow:7`, `woy:53`) for the TID patch.
 
@@ -128,20 +125,19 @@ extended_input, extended_target, extended_states_past, extended_states_future, e
     X=dataset.x,
     Y=dataset.y,
     lookback_window_size=lookback,
-    horizon_size=horizon,
+    horizon=horizon,
     ahead=0,
     permute=permute,
 )
 
-for fw_days in range(1, horizon + 1):
-    targets = test_split["targets"]
-    mse = metrics.get_MSE(extended_target[-(fw_days + targets.shape[0]) : -fw_days], targets)
-    mae = metrics.get_MAE(extended_target[-(fw_days + targets.shape[0]) : -fw_days], targets)
-    rmse = metrics.get_RMSE(extended_target[-(fw_days + targets.shape[0]) : -fw_days], targets)
-    mse_filtered = metrics.get_MSE_filtered(extended_target[-(fw_days + targets.shape[0]) : -fw_days], targets)
-    mae_filtered = metrics.get_MAE_filtered(extended_target[-(fw_days + targets.shape[0]) : -fw_days], targets)
-    medse = metrics.get_medSE(extended_target[-(fw_days + targets.shape[0]) : -fw_days], targets)
-    medae = metrics.get_medAE(extended_target[-(fw_days + targets.shape[0]) : -fw_days], targets)
+targets = test_split["targets"]
+mse = metrics.get_MSE(extended_target[-targets.shape[0] :], targets)
+mae = metrics.get_MAE(extended_target[-targets.shape[0] :], targets)
+rmse = metrics.get_RMSE(extended_target[-targets.shape[0] :], targets)
+mse_filtered = metrics.get_MSE_filtered(extended_target[-targets.shape[0] :], targets)
+mae_filtered = metrics.get_MAE_filtered(extended_target[-targets.shape[0] :], targets)
+medse = metrics.get_medSE(extended_target[-targets.shape[0] :], targets)
+medae = metrics.get_medAE(extended_target[-targets.shape[0] :], targets)
 ```
 
 ### Baseline 2: "repeat last value"

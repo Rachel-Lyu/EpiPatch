@@ -3,6 +3,7 @@ import random
 import numpy as np
 import pandas as pd
 import torch
+import math
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 
@@ -41,18 +42,7 @@ def build_splits(lookback=28, horizon=7, train_rate=0.6, val_rate=0.2, permute=F
     data_df.index = pd.to_datetime(data_df.index)
     raw_df = data_df.copy()
     raw_df = raw_df.clip(lower=0.0)
-    pos_mask = raw_df > 0
-    pos_vals = raw_df.where(pos_mask)
-    std_s = pos_vals.std(axis=0, skipna=True).replace(0, 1.0).fillna(1.0)
-    scaler = {
-        "std": torch.as_tensor(std_s.values, dtype=torch.float32),
-        "zero_preserve": True,
-        "center": False,
-    }
-    data_df = raw_df.copy()
-    nonzero = data_df > 0
-    data_df[nonzero] = data_df[nonzero] / std_s
-    data_df[~nonzero] = 0.0
+    data_df = np.log10(raw_df + 1.0)
     adj_df = pd.read_csv("rawData/processed/JHUcase_adj.csv", index_col = 0)
 
     dataset = UniversalDataset()
@@ -118,7 +108,7 @@ def build_splits(lookback=28, horizon=7, train_rate=0.6, val_rate=0.2, permute=F
             "dynamic_graph": test_adj,
         },
     }
-    return data_df, dataset.graph, splits, tid_s, train_dataset, scaler
+    return data_df, dataset.graph, splits, tid_s, train_dataset
 
 
 def compute_dtw_matrix(train_dataset, dataset_name, cache_dir="."):
@@ -333,7 +323,9 @@ def run_experiment(
         )
 
     targets = splits["test"]["targets"]
-    out = eval_metrics(preds, targets)
+    preds_eval = torch.pow(10.0, preds) - 1.0
+    targets_eval = torch.pow(10.0, targets) - 1.0
+    out = eval_metrics(preds_eval, targets_eval)
 
     model._fit_conformal(
         splits["val"]["features"],
@@ -511,6 +503,7 @@ def run_retraining(
 
         x_eval = full_X[sample_ids]
         y_true = full_y[sample_ids]
+        y_true = torch.pow(10.0, y_true) - 1.0
         states_eval = None if full_states is None else full_states[sample_ids]
         adj_eval = None if full_adj is None else full_adj[sample_ids]
 
@@ -522,6 +515,7 @@ def run_retraining(
                 dynamic_graph=adj_eval,
             )
         y_pred = y_pred.reshape(y_true.shape)
+        y_pred = torch.pow(10.0, y_pred) - 1.0
 
         for local_i, t_idx in enumerate(valid_targets):
             for state_idx, state_name in enumerate(data_df.columns):
@@ -593,10 +587,10 @@ def main():
     dataset_name="JHUcase"
     fix_seed(42)
     device = "cpu"
-    data_df, adj, splits, tid_s, train_dataset, scaler = build_splits()
+    data_df, adj, splits, tid_s, train_dataset = build_splits()
     adj = adj.type(torch.float)
     dtw_matrix = compute_dtw_matrix(train_dataset, dataset_name=dataset_name)
-    out_dir = f"retrain_{dataset_name}"
+    out_dir = f"retrain_log_exp_{dataset_name}"
     # results = []
 
     model_names = [
@@ -617,7 +611,7 @@ def main():
     loss_names = ["mse_weighted_nonzero", "mse_filtered"]
 
     for horizon in [1, 7]: 
-        data_df, adj, splits, tid_s, train_dataset, scaler = build_splits(lookback=28, horizon=horizon, train_rate=0.6, val_rate=0.2)
+        data_df, adj, splits, tid_s, train_dataset = build_splits(lookback=28, horizon=horizon, train_rate=0.6, val_rate=0.2)
         dtw_matrix = compute_dtw_matrix(train_dataset, dataset_name=dataset_name)
         for model_name in model_names:
             for epi_mode in epi_modes:

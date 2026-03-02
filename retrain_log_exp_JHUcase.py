@@ -158,7 +158,14 @@ def build_model(name, lookback, horizon, num_nodes, adj, tid_s, use_future_ti, d
     if name == "ColaGNN":
         return ColaGNN(nhid=16, n_layer=2, **common)
     if name == "DCRNN":
-        return DCRNN(max_diffusion_step=3, **common)
+        return DCRNN(
+            max_diffusion_step=2,
+            filter_type="dual_random_walk",
+            num_rnn_layers=2,
+            rnn_units=32,
+            dropout=0.1,
+            **common,
+        )
     if name == "EpiGNN":
         return EpiGNN(k=5, hidA=32, hidR=4, hidP=1, n_layer=2, dropout=0.2, **common)
     if name == "EARTH":

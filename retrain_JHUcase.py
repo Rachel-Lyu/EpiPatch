@@ -39,7 +39,7 @@ def fix_seed(seed=42):
 def build_splits(lookback=28, horizon=7, train_rate=0.6, val_rate=0.2, permute=False):
     data_df = pd.read_csv("rawData/processed/JHUcase.csv", index_col = 0)
     data_df.index = pd.to_datetime(data_df.index)
-    raw_df = data_df.copy()
+    raw_df = data_df.astype(np.float32).copy()
     raw_df = raw_df.clip(lower=0.0)
     pos_mask = raw_df > 0
     pos_vals = raw_df.where(pos_mask)
@@ -149,8 +149,72 @@ def compute_dtw_matrix(train_dataset, dataset_name, cache_dir="."):
     print(f"Saved DTW matrix to {cache_path}")
     return dtw_matrix
 
+class RepeatLastBaseline:
+    def fit(self, **kwargs):
+        return self
+
+    def train(self):
+        return self
+
+    def eval(self):
+        return self
+
+    def parameters(self):
+        return []
+
+    def predict(self, x_eval, **kwargs):
+        return x_eval[:, -1:, :, 0]
+
+
+class ARIMABaseline:
+    def __init__(self, horizon):
+        self.horizon = horizon
+
+    def fit(self, **kwargs):
+        return self
+
+    def train(self):
+        return self
+
+    def eval(self):
+        return self
+
+    def parameters(self):
+        return []
+
+    def predict(self, x_eval, **kwargs):
+        from statsmodels.tsa.arima.model import ARIMA
+        from statsmodels.tools.sm_exceptions import ConvergenceWarning
+        import warnings
+
+        x_np = x_eval.detach().cpu().numpy()
+        n_samples, _, n_nodes, _ = x_np.shape
+        preds = np.zeros((n_samples, 1, n_nodes), dtype=np.float32)
+
+        for i in range(n_samples):
+            for j in range(n_nodes):
+                series = x_np[i, :, j, 0]
+                fallback = float(series[-1])
+                if np.allclose(series, series[0]):
+                    preds[i, 0, j] = fallback
+                    continue
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", ConvergenceWarning)
+                        warnings.simplefilter("ignore", UserWarning)
+                        fit = ARIMA(series, order=(1, 0, 0)).fit()
+                    preds[i, 0, j] = fit.forecast(steps=self.horizon)[-1]
+                except Exception:
+                    preds[i, 0, j] = fallback
+
+        return torch.as_tensor(preds, dtype=x_eval.dtype, device=x_eval.device)
+
 
 def build_model(name, lookback, horizon, num_nodes, adj, tid_s, use_future_ti, device, dtw_matrix=None):
+    if name == "ARIMA":
+        return ARIMABaseline(horizon=horizon)
+    if name == "repeat_last":
+        return RepeatLastBaseline()
     common = dict(
         num_timesteps_input=lookback,
         num_timesteps_output=1,
@@ -299,7 +363,7 @@ def run_experiment(
         epi_mode=epi_mode,
     )
 
-    if use_einn and epi_mode:
+    if use_einn and epi_mode and model_name not in ("ARIMA", "repeat_last"):
         einn = EinnModule(
             num_nodes=adj.shape[0],
             horizon=horizon,
@@ -341,7 +405,9 @@ def run_experiment(
 
     targets = splits["test"]["targets"]
     out = eval_metrics(preds, targets)
-
+    if model_name in ("ARIMA", "repeat_last"):
+        out.update({"crps": float("nan"), "wis": float("nan")})
+        return out
     model._fit_conformal(
         splits["val"]["features"],
         splits["val"]["targets"],
@@ -392,6 +458,7 @@ def run_retraining(
     use_einn=False,
     loss_name="mse",
     tag_prefix="",
+    retrain_schedule=None,
 ):
     """Walk-forward retraining demo with per-retrain plotting."""
     n_total = len(data_df)
@@ -416,13 +483,26 @@ def run_retraining(
         horizon=horizon,
         permute=False,
     )
-
+    if retrain_schedule is None:
+        retrain_schedule = []
+        for start_idx in range(first_target, n_total, retrain_every):
+            train_end = start_idx
+            train_start = max(0, train_end - retrain_train_length)
+            target_indices = list(range(start_idx, min(start_idx + retrain_every, n_total)))
+            retrain_schedule.append(
+                {
+                    "start_idx": start_idx,
+                    "train_start": train_start,
+                    "train_end": train_end,
+                    "target_indices": target_indices,
+                }
+            )
     rows = []
     retrain_id = 0
-    for start_idx in range(first_target, n_total, retrain_every):
-        train_end = start_idx
-        train_start = max(0, train_end - retrain_train_length)
-        target_indices = list(range(start_idx, min(start_idx + retrain_every, n_total)))
+    for schedule in retrain_schedule:
+        train_start = schedule["train_start"]
+        train_end = schedule["train_end"]
+        target_indices = schedule["target_indices"]
 
         subset_values = values[train_start:train_end]
         subset_targets = targets_full[train_start:train_end]
@@ -486,7 +566,7 @@ def run_retraining(
             epi_mode=epi_mode,
         )
 
-        if use_einn and epi_mode:
+        if use_einn and epi_mode and model_name not in ("ARIMA", "repeat_last"):
             einn = EinnModule(
                 num_nodes=adj.shape[0],
                 horizon=horizon,
@@ -538,6 +618,10 @@ def run_retraining(
                         "timestamp": data_df.index[t_idx],
                         "state_idx": state_idx,
                         "state": str(state_name),
+                        "train_start": data_df.index[train_start],
+                        "train_end": data_df.index[train_end - 1],
+                        "eval_start": data_df.index[target_indices[0]],
+                        "eval_end": data_df.index[target_indices[-1]],
                         "y_true": y_true[local_i, 0, state_idx].item(),
                         "y_pred": y_pred[local_i, 0, state_idx].item(),
                     }
@@ -603,10 +687,12 @@ def main():
     data_df, adj, splits, tid_s, train_dataset, scaler = build_splits()
     adj = adj.type(torch.float)
     dtw_matrix = compute_dtw_matrix(train_dataset, dataset_name=dataset_name)
-    out_dir = f"retrain_{dataset_name}"
+    out_dir = f"retrain0301_{dataset_name}"
     # results = []
 
     model_names = [
+        "repeat_last",
+        "ARIMA",
         "AGCRN",
         "DCRNN",
         "GTS",
@@ -623,9 +709,18 @@ def main():
     epi_modes = [False, "sir_incidence", "ngm"]
     loss_names = ["mse_weighted_nonzero", "mse_filtered"]
 
-    for horizon in [1, 7]: 
+    for horizon in [1]: 
         data_df, adj, splits, tid_s, train_dataset, scaler = build_splits(lookback=28, horizon=horizon, train_rate=0.6, val_rate=0.2)
         dtw_matrix = compute_dtw_matrix(train_dataset, dataset_name=dataset_name)
+        first_target = 28 + horizon - 1
+        retrain_schedule = []
+        for start_idx in range(first_target, len(data_df), 90):
+            retrain_schedule.append({
+                "start_idx": start_idx,
+                "train_start": max(0, start_idx - 180),
+                "train_end": start_idx,
+                "target_indices": list(range(start_idx, min(start_idx + 90, len(data_df)))),
+            })
         for model_name in model_names:
             for epi_mode in epi_modes:
                 for loss_name in loss_names:
@@ -657,6 +752,7 @@ def main():
                                 use_einn=use_einn,
                                 loss_name=loss_name,
                                 tag_prefix=retrain_tag,
+                                retrain_schedule=retrain_schedule,
                             )
                             csv_path = os.path.join(
                                 out_dir,

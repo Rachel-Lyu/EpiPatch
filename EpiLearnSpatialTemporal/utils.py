@@ -18,10 +18,11 @@ def generate_dataset(
     win = lookback_window_size + horizon
     indices = [(i, i + win) for i in range(T - win + 1)]
 
-    # Targets: fixed lead [N, 1, ...]
+    # Targets: horizon-th step only [N, 1, ...]
     target_slices = []
-    for i, j in indices:
-        target_slices.append(Y[i + lookback_window_size + horizon - 1 : j])
+    for i, _ in indices:
+        target_t = i + lookback_window_size + horizon - 1
+        target_slices.append(Y[target_t : target_t + 1])
     targets = torch.stack(target_slices) if target_slices else torch.Tensor([[[]]])
 
     # Past X windows: [N, L, ...]
@@ -34,9 +35,9 @@ def generate_dataset(
     if states is not None:
         assert states.dim() == 2, "states must be [T, C]"
         S_past_slices, S_future_slices = [], []
-        for i, j in indices:
-            S_past_slices.append(states[i : i + lookback_window_size])  # [L, C]
-            S_future_slices.append(states[i + lookback_window_size + horizon - 1 : j])  # [1, C]
+        for i, _ in indices:
+            target_t = i + lookback_window_size + horizon - 1
+            S_future_slices.append(states[target_t : target_t + 1])  # [1, C]
         S_past = torch.stack(S_past_slices) if S_past_slices else torch.Tensor([[[]]])
         S_future = torch.stack(S_future_slices) if S_future_slices else torch.Tensor([[[]]])
 

@@ -248,8 +248,9 @@ class UniversalDataset():
             raise ValueError(f"horizon must be >= 1, got {horizon}")
         indices = [(i, i + (lookback_window_size + horizon)) for i in range(X.shape[0] - (lookback_window_size + horizon) + 1)]
         target = []
-        for i, j in indices:
-            target.append(Y[i + lookback_window_size + horizon - 1: j])
+        for i, _ in indices:
+            target_t = i + lookback_window_size + horizon - 1
+            target.append(Y[target_t: target_t + 1])
         
         targets = torch.stack(target) if len(target) > 0 else torch.Tensor([[[]]])
         if permute:

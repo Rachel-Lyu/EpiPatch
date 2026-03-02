@@ -198,11 +198,13 @@ class DCGRUCell(nn.Module):
         x0 = x.permute(1, 2, 0)  # (num_nodes, total_arg_size, batch_size)
         x0 = torch.reshape(x0, shape=[self._num_nodes, input_size * batch_size])
         x = torch.unsqueeze(x0, 0)
+        x0_base = x0
 
         if self._max_diffusion_step == 0:
             pass
         else:
             for support in self._supports:
+                x0 = x0_base
                 x1 = torch.sparse.mm(support, x0)
                 x = self._concat(x, x1)
 

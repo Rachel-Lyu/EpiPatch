@@ -39,6 +39,20 @@ def fix_seed(seed=42):
 def build_splits(lookback=28, horizon=7, train_rate=0.6, val_rate=0.2, permute=False):
     data_df = pd.read_csv("rawData/processed/JHUcase.csv", index_col = 0)
     data_df.index = pd.to_datetime(data_df.index)
+    raw_df = data_df.copy()
+    raw_df = raw_df.clip(lower=0.0)
+    pos_mask = raw_df > 0
+    pos_vals = raw_df.where(pos_mask)
+    std_s = pos_vals.std(axis=0, skipna=True).replace(0, 1.0).fillna(1.0)
+    scaler = {
+        "std": torch.as_tensor(std_s.values, dtype=torch.float32),
+        "zero_preserve": True,
+        "center": False,
+    }
+    data_df = raw_df.copy()
+    nonzero = data_df > 0
+    data_df[nonzero] = data_df[nonzero] / std_s
+    data_df[~nonzero] = 0.0
     adj_df = pd.read_csv("rawData/processed/JHUcase_adj.csv", index_col = 0)
 
     dataset = UniversalDataset()
@@ -105,7 +119,7 @@ def build_splits(lookback=28, horizon=7, train_rate=0.6, val_rate=0.2, permute=F
         },
     }
 
-    return data_df, dataset.graph, splits, tid_s, train_dataset
+    return raw_df, dataset.graph, splits, tid_s, train_dataset, scaler
 
 
 def compute_dtw_matrix(train_dataset, dataset_name, cache_dir="."):
@@ -140,7 +154,7 @@ def compute_dtw_matrix(train_dataset, dataset_name, cache_dir="."):
 def build_model(name, lookback, horizon, num_nodes, adj, tid_s, use_future_ti, device, dtw_matrix=None):
     common = dict(
         num_timesteps_input=lookback,
-        num_timesteps_output=horizon,
+        num_timesteps_output=1,
         adj_m=adj,
         num_nodes=num_nodes,
         num_features=1,
@@ -205,7 +219,7 @@ def build_model(name, lookback, horizon, num_nodes, adj, tid_s, use_future_ti, d
     if name == "Dlinear":
         return DlinearModel(
             num_timesteps_input=lookback,
-            num_timesteps_output=horizon,
+            num_timesteps_output=1,
             num_features=1,
             num_nodes=num_nodes,
             use_future_ti=use_future_ti,
@@ -356,10 +370,10 @@ def main():
     dataset_name="JHUcase"
     fix_seed(42)
     device = "cpu"
-    data_df, adj, splits, tid_s, train_dataset = build_splits()
+    data_df, adj, splits, tid_s, train_dataset, scaler = build_splits()
     adj = adj.type(torch.float)
     dtw_matrix = compute_dtw_matrix(train_dataset, dataset_name=dataset_name)
-    out_dir = f"outputs0217_{dataset_name}"
+    out_dir = f"outputs0222_{dataset_name}"
     results = []
 
     model_names = [
@@ -380,7 +394,7 @@ def main():
     loss_names = ["mse", "mse_filtered"]
 
     for horizon in [1, 7]: 
-        data_df, adj, splits, tid_s, train_dataset = build_splits(lookback=28, horizon=horizon, train_rate=0.6, val_rate=0.2)
+        data_df, adj, splits, tid_s, train_dataset, scaler = build_splits(lookback=28, horizon=horizon, train_rate=0.6, val_rate=0.2)
         dtw_matrix = compute_dtw_matrix(train_dataset, dataset_name=dataset_name)
         for model_name in model_names:
             for epi_mode in epi_modes:

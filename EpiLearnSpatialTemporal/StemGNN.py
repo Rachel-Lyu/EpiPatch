@@ -127,6 +127,8 @@ class StemGNN(BaseModel):
                          num_nodes=num_nodes)
         self.num_nodes = num_nodes
         self.stack_cnt = stack_cnt
+        if self.stack_cnt < 1:
+            raise ValueError("stack_cnt must be >= 1 for StemGNN.")
         self.alpha = leaky_rate
         self.time_step = num_timesteps_input
         self.horizon = num_timesteps_output
@@ -219,7 +221,8 @@ class StemGNN(BaseModel):
         for stack_i in range(self.stack_cnt):
             forecast, X = self.stock_block[stack_i](X, mul_L)
             result.append(forecast)
-        forecast = result[0] + result[1]
+        # Aggregate all stacks instead of assuming exactly 2 stacks.
+        forecast = torch.stack(result, dim=0).sum(dim=0)
         forecast = self.fc(forecast)
         forecast = forecast.permute(0, 2, 1).contiguous()
         return forecast

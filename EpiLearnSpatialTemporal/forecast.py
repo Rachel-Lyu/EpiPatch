@@ -10,7 +10,7 @@ class BaseTask:
         self.device = device
         self.lookback = lookback
         self.horizon = horizon
-        self.ahead = ahead
+        self.ahead = None
     
     def load_model(self, model):
         pass
@@ -112,18 +112,18 @@ class Forecast(BaseTask):
                         num_nodes=self.adj.shape[0],
                         num_features=self.train_split['features'].shape[3],
                         num_timesteps_input=self.lookback,
-                        num_timesteps_output=self.horizon,
+                        num_timesteps_output=1,
                         device=self.device,
                         ).to(self.device)
                     pytorch_total_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
                     print('#params:',pytorch_total_params)
                 except:
                     self.model = self.prototype(
-                                            num_features=self.train_split['features'].shape[2],
-                                            num_timesteps_input=self.lookback,
-                                            num_timesteps_output=self.horizon,
-                                            device=self.device,
-                                            ).to(self.device)
+                        num_features=self.train_split['features'].shape[2],
+                        num_timesteps_input=self.lookback,
+                        num_timesteps_output=1,
+                        device=self.device,
+                        ).to(self.device)
                     pytorch_total_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
                     print('#params:',pytorch_total_params)
         self.model = self.model.to(self.device)
@@ -260,33 +260,27 @@ class Forecast(BaseTask):
 
         adj = self.train_dataset['graph']
         
-        train_input, train_target, train_states, train_adj = dataset.generate_dataset(
-                                                                                        X=self.train_dataset['features'], 
-                                                                                        Y=self.train_dataset['target'], 
-                                                                                        states=self.train_dataset['states'],
-                                                                                        dynamic_adj = self.train_dataset['dynamic_graph'],
-                                                                                        lookback_window_size=self.lookback,
-                                                                                        horizon_size=self.horizon, 
-                                                                                        ahead=self.ahead,
-                                                                                        permute=permute)
-        val_input, val_target, val_states, val_adj = dataset.generate_dataset(
-                                                                                X=self.val_dataset['features'], 
-                                                                                Y=self.val_dataset['target'], 
-                                                                                states=self.val_dataset['states'],
-                                                                                dynamic_adj = self.val_dataset['dynamic_graph'],
-                                                                                lookback_window_size=self.lookback, 
-                                                                                horizon_size=self.horizon, 
-                                                                                ahead=self.ahead,
-                                                                                permute=permute)
-        test_input, test_target, test_states, test_adj = dataset.generate_dataset(
-                                                                                    X=self.test_dataset['features'], 
-                                                                                    Y=self.test_dataset['target'], 
-                                                                                    states=self.test_dataset['states'],
-                                                                                    dynamic_adj = self.test_dataset['dynamic_graph'],
-                                                                                    lookback_window_size=self.lookback, 
-                                                                                    horizon_size=self.horizon, 
-                                                                                    ahead=self.ahead,
-                                                                                    permute=permute)
+        train_input, train_target, train_states, train_adj = dataset.generate_dataset(X=self.train_dataset['features'], 
+                                                                                      Y=self.train_dataset['target'], 
+                                                                                      states=self.train_dataset['states'],
+                                                                                      dynamic_adj = self.train_dataset['dynamic_graph'],
+                                                                                      lookback_window_size=self.lookback,
+                                                                                      horizon=self.horizon,
+                                                                                      permute=permute)
+        val_input, val_target, val_states, val_adj = dataset.generate_dataset(X=self.val_dataset['features'], 
+                                                                              Y=self.val_dataset['target'], 
+                                                                              states=self.val_dataset['states'],
+                                                                              dynamic_adj = self.val_dataset['dynamic_graph'],
+                                                                              lookback_window_size=self.lookback, 
+                                                                              horizon=self.horizon,
+                                                                              permute=permute)
+        test_input, test_target, test_states, test_adj = dataset.generate_dataset(X=self.test_dataset['features'], 
+                                                                                  Y=self.test_dataset['target'], 
+                                                                                  states=self.test_dataset['states'],
+                                                                                  dynamic_adj = self.test_dataset['dynamic_graph'],
+                                                                                  lookback_window_size=self.lookback, 
+                                                                                  horizon=self.horizon,
+                                                                                  permute=permute)
         if region_idx is not None:
             train_input = train_input[:,:,region_idx,:]
             val_input = val_input[:,:,region_idx,:]

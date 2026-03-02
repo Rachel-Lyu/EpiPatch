@@ -140,7 +140,7 @@ def compute_dtw_matrix(train_dataset, dataset_name, cache_dir="."):
 def build_model(name, lookback, horizon, num_nodes, adj, tid_s, use_future_ti, device, dtw_matrix=None):
     common = dict(
         num_timesteps_input=lookback,
-        num_timesteps_output=horizon,
+        num_timesteps_output=1,
         adj_m=adj,
         num_nodes=num_nodes,
         num_features=1,
@@ -205,7 +205,7 @@ def build_model(name, lookback, horizon, num_nodes, adj, tid_s, use_future_ti, d
     if name == "Dlinear":
         return DlinearModel(
             num_timesteps_input=lookback,
-            num_timesteps_output=horizon,
+            num_timesteps_output=1,
             num_features=1,
             num_nodes=num_nodes,
             use_future_ti=use_future_ti,

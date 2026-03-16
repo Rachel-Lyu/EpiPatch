@@ -706,9 +706,9 @@ def main():
         "GraphWaveNet",
     ]
     epi_modes = [False, "sir_incidence", "ngm"]
-    loss_names = ["mse_weighted_nonzero", "mse_filtered"]
+    loss_names = ["mse", "mse_filtered"]
 
-    for horizon in [1]: 
+    for horizon in [1, 4, 7, 10, 14, 28]: 
         data_df, adj, splits, tid_s, train_dataset, scaler = build_splits(lookback=28, horizon=horizon, train_rate=0.6, val_rate=0.2)
         dtw_matrix = compute_dtw_matrix(train_dataset, dataset_name=dataset_name)
         first_target = 28 + horizon - 1

@@ -36,10 +36,12 @@ def fix_seed(seed=42):
     os.environ["PYTHONHASHSEED"] = str(seed)
 
 
-def build_splits(lookback=12, horizon=4, train_rate=0.6, val_rate=0.2, permute=False):
-    data_df = pd.read_csv("rawData/processed/ILI2019.csv", index_col=0)
+def build_splits(lookback=28, horizon=7, train_rate=0.6, val_rate=0.2, permute=False):
+    data_df = pd.read_csv("rawData/processed/DVcli.csv", index_col = 0)
+    data_df = data_df.fillna(0)
+    data_df = data_df / 100
     data_df.index = pd.to_datetime(data_df.index)
-    adj_df = pd.read_csv("rawData/processed/ILI2019_adj.csv", index_col=0)
+    adj_df = pd.read_csv("rawData/processed/DVcli_adj.csv", index_col = 0)
 
     dataset = UniversalDataset()
     data = np.expand_dims(data_df.values, axis=-1)
@@ -48,9 +50,9 @@ def build_splits(lookback=12, horizon=4, train_rate=0.6, val_rate=0.2, permute=F
     dataset.graph = torch.FloatTensor(adj_df.to_numpy())
 
     dow = torch.as_tensor(data_df.index.dayofweek.values, dtype=torch.long)
-    woy = torch.as_tensor(data_df.index.isocalendar().week.values - 1, dtype=torch.long)
-    dataset.states = torch.stack([woy], dim=-1)
-    tid_s = {"woy": 53}
+    # woy = torch.as_tensor(data_df.index.isocalendar().week.values - 1, dtype=torch.long)
+    dataset.states = torch.stack([dow], dim=-1)
+    tid_s = {'dow': 7}
 
     train_dataset, val_dataset, test_dataset = dataset.ganerate_splits(
         train_rate=train_rate, val_rate=val_rate
@@ -104,7 +106,6 @@ def build_splits(lookback=12, horizon=4, train_rate=0.6, val_rate=0.2, permute=F
             "dynamic_graph": test_adj,
         },
     }
-
     return data_df, dataset.graph, splits, tid_s, train_dataset
 
 
@@ -215,11 +216,18 @@ def build_model(name, lookback, horizon, num_nodes, adj, tid_s, use_future_ti, d
         ti_hidden=(8,),
     )
     if name == "AGCRN":
-        return AGCRN(rnn_units=8, nlayers=2, embed_dim=8, cheb_k=2, **common)
+        return AGCRN(rnn_units=4, nlayers=2, embed_dim=8, cheb_k=2, **common)
     if name == "ColaGNN":
-        return ColaGNN(nhid=16, n_layer=1, **common)
+        return ColaGNN(nhid=16, n_layer=2, **common)
     if name == "DCRNN":
-        return DCRNN(max_diffusion_step=3, **common)
+        return DCRNN(
+            max_diffusion_step=2,
+            filter_type="dual_random_walk",
+            num_rnn_layers=2,
+            rnn_units=32,
+            dropout=0.1,
+            **common,
+        )
     if name == "EpiGNN":
         return EpiGNN(k=5, hidA=16, hidR=4, hidP=1, n_layer=2, dropout=0.2, **common)
     if name == "EARTH":
@@ -228,7 +236,7 @@ def build_model(name, lookback, horizon, num_nodes, adj, tid_s, use_future_ti, d
         return EARTH(
             dtw_matrix=dtw_matrix,
             dropout=0.2,
-            n_hidden=16,
+            n_hidden=8,
             **common,
         )
     if name == "GraphWaveNet":
@@ -238,15 +246,15 @@ def build_model(name, lookback, horizon, num_nodes, adj, tid_s, use_future_ti, d
             skip_channels=32,
             end_channels=64,
             kernel_size=2,
-            blocks=2,
-            nlayers=2,
+            blocks=4,
+            nlayers=8,
             **common,
         )
     if name == "MTGNN":
         return MTGNN(
-            gcn_depth=2,
+            gcn_depth=3,
             dropout=0.2,
-            subgraph_size=5,
+            subgraph_size=3,
             node_dim=8,
             dilation_exponential=1,
             conv_channels=8,
@@ -261,7 +269,7 @@ def build_model(name, lookback, horizon, num_nodes, adj, tid_s, use_future_ti, d
     if name == "STGCN":
         return STGCN(nhids=32, **common)
     if name == "GTS":
-        return GTS(rnn_units=32, max_diffusion_step=2, **common)
+        return GTS(rnn_units=16, max_diffusion_step=2, **common)
     if name == "StemGNN":
         return StemGNN(stack_cnt=2, multi_layer=4, dropout_rate=0.2, leaky_rate=0.2, **common)
     if name == "STNorm":
@@ -424,10 +432,10 @@ def run_retraining(
     adj,
     tid_s,
     model_name="Dlinear",
-    horizon=4,
-    lookback=12,
-    retrain_every=8,
-    retrain_train_length=100,
+    horizon=7,
+    lookback=28,
+    retrain_every=90,
+    retrain_train_length=180,
     first_target=None,
     out_dir="outputs_retrain",
     device="cpu",
@@ -488,34 +496,33 @@ def run_retraining(
         subset_targets = targets_full[train_start:train_end]
         subset_states = states[train_start:train_end]
 
-        subset_ds = UniversalDataset()
-        subset_ds.x = subset_values
-        subset_ds.y = subset_targets
-        subset_ds.graph = adj
-        subset_ds.states = subset_states
-        train_ds, val_ds, _ = subset_ds.ganerate_splits(train_rate=0.8, val_rate=0.2)
-
-        train_input, train_target, _, train_states_future, train_adj = generate_dataset(
-            X=train_ds["features"],
-            Y=train_ds["target"],
-            states=train_ds["states"],
-            dynamic_adj=train_ds["dynamic_graph"],
+        all_input, all_target, _, all_states_future, all_adj = generate_dataset(
+            X=subset_values,
+            Y=subset_targets,
+            states=subset_states,
+            dynamic_adj=None,
             lookback_window_size=lookback,
             horizon=horizon,
             permute=False,
         )
-        val_input, val_target, _, val_states_future, val_adj = generate_dataset(
-            X=val_ds["features"],
-            Y=val_ds["target"],
-            states=val_ds["states"],
-            dynamic_adj=val_ds["dynamic_graph"],
-            lookback_window_size=lookback,
-            horizon=horizon,
-            permute=False,
-        )
-
-        if train_input.numel() == 0 or val_input.numel() == 0:
+        n_windows = all_input.shape[0]
+        if n_windows < 2:
             continue
+
+        n_train = max(1, int(0.8 * n_windows))
+        if n_train >= n_windows:
+            n_train = n_windows - 1
+
+        train_input = all_input[:n_train]
+        train_target = all_target[:n_train]
+        train_states_future = None if all_states_future is None else all_states_future[:n_train]
+        train_adj = None if all_adj is None else all_adj[:n_train]
+
+        val_input = all_input[n_train:]
+        val_target = all_target[n_train:]
+        val_states_future = None if all_states_future is None else all_states_future[n_train:]
+        val_adj = None if all_adj is None else all_adj[n_train:]
+
 
         model = build_model(
             model_name,
@@ -643,7 +650,7 @@ def plot_retraining_state_from_csv(csv_path, state=None, state_idx=None, out_pat
     plt.figure(figsize=(11, 4))
     for rid, grp in sub_df.groupby("retrain_id"):
         grp = grp.sort_values("timestamp")
-        plt.plot(grp["timestamp"], grp["y_pred"], alpha=0.7)
+        plt.plot(grp["timestamp"], grp["y_pred"], alpha=0.5, label=f"pred_r{rid}")
 
     truth = sub_df.sort_values("timestamp").drop_duplicates(subset=["timestamp"], keep="last")
     plt.plot(truth["timestamp"], truth["y_true"], color="black", linewidth=1.5, label="y_true")
@@ -661,7 +668,7 @@ def plot_retraining_state_from_csv(csv_path, state=None, state_idx=None, out_pat
     return out_path
 
 def main():
-    dataset_name="ILI2019"
+    dataset_name="DVcli"
     fix_seed(42)
     device = "cpu"
     data_df, adj, splits, tid_s, train_dataset = build_splits()
@@ -671,16 +678,8 @@ def main():
     # results = []
 
     model_names = [
-        "repeat_last",
-        "ARIMA",
-        "Dlinear",
-        "AGCRN",
-        "ColaGNN",
-        "DCRNN",
-        "EpiGNN",
         "MTGNN",
         "STGCN",
-        "GTS",
         "StemGNN",
         "STNorm",
         "EARTH",
@@ -689,17 +688,17 @@ def main():
     epi_modes = [False, "sir_percent", "ngm"]
     loss_names = ["mse", "mse_filtered"]
 
-    for horizon in [1, 2, 4, 8]: 
-        data_df, adj, splits, tid_s, train_dataset = build_splits(lookback=12, horizon=horizon, train_rate=0.6, val_rate=0.2)
+    for horizon in [10]: 
+        data_df, adj, splits, tid_s, train_dataset = build_splits(lookback=28, horizon=horizon, train_rate=0.6, val_rate=0.2)
         dtw_matrix = compute_dtw_matrix(train_dataset, dataset_name=dataset_name)
-        first_target = 12 + horizon - 1
+        first_target = 28 + horizon - 1
         retrain_schedule = []
-        for start_idx in range(first_target, len(data_df), 8):
+        for start_idx in range(first_target, len(data_df), 90):
             retrain_schedule.append({
                 "start_idx": start_idx,
-                "train_start": max(0, start_idx - 100),
+                "train_start": max(0, start_idx - 180),
                 "train_end": start_idx,
-                "target_indices": list(range(start_idx, min(start_idx + 8, len(data_df)))),
+                "target_indices": list(range(start_idx, min(start_idx + 90, len(data_df)))),
             })
         for model_name in model_names:
             for epi_mode in epi_modes:
@@ -720,9 +719,9 @@ def main():
                                 tid_s=tid_s,
                                 model_name=model_name,
                                 horizon=horizon,
-                                lookback=12,
-                                retrain_every=8,
-                                retrain_train_length=100,
+                                lookback=28,
+                                retrain_every=90,
+                                retrain_train_length=180,
                                 out_dir=out_dir,
                                 device=device,
                                 dtw_matrix=dtw_matrix if model_name == "EARTH" else None,

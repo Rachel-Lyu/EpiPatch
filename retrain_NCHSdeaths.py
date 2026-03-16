@@ -37,9 +37,23 @@ def fix_seed(seed=42):
 
 
 def build_splits(lookback=12, horizon=4, train_rate=0.6, val_rate=0.2, permute=False):
-    data_df = pd.read_csv("rawData/processed/ILI2019.csv", index_col=0)
+    data_df = pd.read_csv("rawData/processed/NCHSdeaths.csv", index_col=0)
     data_df.index = pd.to_datetime(data_df.index)
-    adj_df = pd.read_csv("rawData/processed/ILI2019_adj.csv", index_col=0)
+    raw_df = data_df.astype(np.float32).copy()
+    raw_df = raw_df.clip(lower=0.0)
+    pos_mask = raw_df > 0
+    pos_vals = raw_df.where(pos_mask)
+    std_s = pos_vals.std(axis=0, skipna=True).replace(0, 1.0).fillna(1.0)
+    scaler = {
+        "std": torch.as_tensor(std_s.values, dtype=torch.float32),
+        "zero_preserve": True,
+        "center": False,
+    }
+    data_df = raw_df.copy()
+    nonzero = data_df > 0
+    data_df[nonzero] = data_df[nonzero] / std_s
+    data_df[~nonzero] = 0.0
+    adj_df = pd.read_csv("rawData/processed/NCHSdeaths_adj.csv", index_col=0)
 
     dataset = UniversalDataset()
     data = np.expand_dims(data_df.values, axis=-1)
@@ -105,7 +119,7 @@ def build_splits(lookback=12, horizon=4, train_rate=0.6, val_rate=0.2, permute=F
         },
     }
 
-    return data_df, dataset.graph, splits, tid_s, train_dataset
+    return data_df, dataset.graph, splits, tid_s, train_dataset, scaler
 
 
 def compute_dtw_matrix(train_dataset, dataset_name, cache_dir="."):
@@ -488,34 +502,32 @@ def run_retraining(
         subset_targets = targets_full[train_start:train_end]
         subset_states = states[train_start:train_end]
 
-        subset_ds = UniversalDataset()
-        subset_ds.x = subset_values
-        subset_ds.y = subset_targets
-        subset_ds.graph = adj
-        subset_ds.states = subset_states
-        train_ds, val_ds, _ = subset_ds.ganerate_splits(train_rate=0.8, val_rate=0.2)
-
-        train_input, train_target, _, train_states_future, train_adj = generate_dataset(
-            X=train_ds["features"],
-            Y=train_ds["target"],
-            states=train_ds["states"],
-            dynamic_adj=train_ds["dynamic_graph"],
+        all_input, all_target, _, all_states_future, all_adj = generate_dataset(
+            X=subset_values,
+            Y=subset_targets,
+            states=subset_states,
+            dynamic_adj=None,
             lookback_window_size=lookback,
             horizon=horizon,
             permute=False,
         )
-        val_input, val_target, _, val_states_future, val_adj = generate_dataset(
-            X=val_ds["features"],
-            Y=val_ds["target"],
-            states=val_ds["states"],
-            dynamic_adj=val_ds["dynamic_graph"],
-            lookback_window_size=lookback,
-            horizon=horizon,
-            permute=False,
-        )
-
-        if train_input.numel() == 0 or val_input.numel() == 0:
+        n_windows = all_input.shape[0]
+        if n_windows < 2:
             continue
+
+        n_train = max(1, int(0.8 * n_windows))
+        if n_train >= n_windows:
+            n_train = n_windows - 1
+
+        train_input = all_input[:n_train]
+        train_target = all_target[:n_train]
+        train_states_future = None if all_states_future is None else all_states_future[:n_train]
+        train_adj = None if all_adj is None else all_adj[:n_train]
+
+        val_input = all_input[n_train:]
+        val_target = all_target[n_train:]
+        val_states_future = None if all_states_future is None else all_states_future[n_train:]
+        val_adj = None if all_adj is None else all_adj[n_train:]
 
         model = build_model(
             model_name,
@@ -661,10 +673,10 @@ def plot_retraining_state_from_csv(csv_path, state=None, state_idx=None, out_pat
     return out_path
 
 def main():
-    dataset_name="ILI2019"
+    dataset_name="NCHSdeaths"
     fix_seed(42)
     device = "cpu"
-    data_df, adj, splits, tid_s, train_dataset = build_splits()
+    data_df, adj, splits, tid_s, train_dataset, scaler = build_splits()
     adj = adj.type(torch.float)
     dtw_matrix = compute_dtw_matrix(train_dataset, dataset_name=dataset_name)
     out_dir = f"retrain0301_{dataset_name}"
@@ -686,11 +698,11 @@ def main():
         "EARTH",
         "GraphWaveNet",
     ]
-    epi_modes = [False, "sir_percent", "ngm"]
+    epi_modes = [False, "sir_incidence", "ngm"]
     loss_names = ["mse", "mse_filtered"]
 
     for horizon in [1, 2, 4, 8]: 
-        data_df, adj, splits, tid_s, train_dataset = build_splits(lookback=12, horizon=horizon, train_rate=0.6, val_rate=0.2)
+        data_df, adj, splits, tid_s, train_dataset, scaler = build_splits(lookback=12, horizon=horizon, train_rate=0.6, val_rate=0.2)
         dtw_matrix = compute_dtw_matrix(train_dataset, dataset_name=dataset_name)
         first_target = 12 + horizon - 1
         retrain_schedule = []

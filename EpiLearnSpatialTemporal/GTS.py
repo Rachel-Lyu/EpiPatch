@@ -372,8 +372,8 @@ class GTS(BaseModel, Seq2SeqAttrs):
         self.cl_decay_steps = int(cl_decay_steps)
         self.use_curriculum_learning = bool(use_curriculum_learning)
         self.embedding_dim = 100
-        self.conv1 = torch.nn.Conv1d(1, 8, 10, stride=1)  # .to(device)
-        self.conv2 = torch.nn.Conv1d(8, 16, 10, stride=1)  # .to(device)
+        self.conv1 = torch.nn.Conv1d(1, 8, 3, stride=1)  # .to(device)
+        self.conv2 = torch.nn.Conv1d(8, 16, 3, stride=1)  # .to(device)
         self.hidden_drop = torch.nn.Dropout(0.2)
         self.bn1 = torch.nn.BatchNorm1d(8)
         self.bn2 = torch.nn.BatchNorm1d(16)
@@ -404,8 +404,8 @@ class GTS(BaseModel, Seq2SeqAttrs):
             self.prior_adj = torch.Tensor(g)
         def out_len_1d(L, k, s=1, p=0, d=1):
             return (L + 2*p - d*(k-1) - 1)//s + 1
-        L1 = out_len_1d(self.node_feats.shape[0], 10, 1, 0, 1)   # conv1
-        L2 = out_len_1d(L1, 10, 1, 0, 1)  # conv2
+        L1 = out_len_1d(self.node_feats.shape[0], 3, 1, 0, 1)   # conv1
+        L2 = out_len_1d(L1, 3, 1, 0, 1)  # conv2
         self.fc = torch.nn.Linear(16 * L2, self.embedding_dim)
 
     def encoder(self, inputs, adj):
